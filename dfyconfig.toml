@@ -1,0 +1,4 @@
+includes = ["src/*.dfy", "lemmas/*.dfy", "tests/*.dfy"]
+
+[options]
+verification-time-limit = 120
