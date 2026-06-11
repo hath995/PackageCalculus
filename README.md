@@ -17,6 +17,7 @@ src/                    Definitions and executable functions/methods
   Core.dfy                §3.1  core calculus; Name/PFormula datatypes
   Solver.dfy              exhaustive resolver with a verified exactness contract
   Versions.dfy            §3.2  version/resolution orderings, Version Formula Calculus
+  MinVersion.dfy          §3.3  minimum-bound (MVS) and uniqueness-free resolution
   Conflicts.dfy           §4.1  Conflict Package Calculus + reduction
   Concurrent.dfy          §4.2  Concurrent Package Calculus + reduction
   Peers.dfy               §4.3  Peer Package Calculus + reduction
@@ -45,6 +46,8 @@ NP-membership half of Theorem 3.1.4.
 | Thm 3.2.7 | version formula reduction correct | `VfReductionCorrect` (VersionsLemmas) |
 | Thm 3.1.4 | NP-hardness via 3-SAT (App. B) | `SatGivesResolution`, `ResolutionGivesSat`, `HardnessCorrect` (HardnessLemmas) |
 | Thm 3.1.4 | NP membership | executable `ValidResolution`; `AllResolutions` exactness contract (Solver) |
+| §3.3 (1) | min-bound greedy suffices; lock-free determinism; upgrade tolerance; ≥-fragment of §3.2 | `MvsVisited`+`MvsValid`, `MvsDeterministic`, `UpgradeToleratesBounds`, `MinToCoreCorrect` (MinVersionLemmas) — needs the fresh-root hypothesis, see [FINDINGS.md](FINDINGS.md) |
+| §3.3 (2) | uniqueness-free resolution is graph traversal; = Concurrent calculus at identity g | `MultiResolve`, `MultiToConcurrentIdentity`, `ConcurrentToMulti` (MinVersionLemmas) |
 | Thm 4.1.4/4.1.5 | conflict reduction sound & complete | `ConflictReduction{Sound,Complete}` (ConflictsLemmas) |
 | Thm 4.2.4/4.2.5 | concurrent versions reduction sound & complete | `ConcReduction{Sound,Complete}` (ConcurrentLemmas) |
 | Def 4.2.1 | constant g emulates the core | `CoreEmulation{Forward,Backward}` (ConcurrentLemmas) |
@@ -115,10 +118,12 @@ reduction-level repair, in [FINDINGS.md](FINDINGS.md).
 
 ## Scope (what is not mechanised)
 
-The §3.3 MVS/greedy complexity results, Definition C.5 (ordered SAT), and
-the §4.9 impossibility remark (no reduction from the core to singular
-dependencies — a statement over all reductions). Everything stated as a
-lemma is proved; there are no `assume` statements or axioms.
+The asymptotic complexity bounds of §3.3 (the verified resolvers are
+worklist graph traversals of the claimed shape, but O(·) is not stated
+formally), Definition C.5 (ordered SAT), and the §4.9 impossibility
+remark (no reduction from the core to singular dependencies — a statement
+over all reductions). Everything stated as a lemma is proved; there are
+no `assume` statements or axioms.
 
 ## Build & run
 

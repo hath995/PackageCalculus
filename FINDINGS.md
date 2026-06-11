@@ -1,4 +1,13 @@
-# Finding: Theorem 5.2.2 of "Package Managers à la Carte" fails as stated
+# Findings from mechanising "Package Managers à la Carte"
+
+Two of the paper's claims needed qualification when machine-checked. The
+first (Theorem 5.2.2) is an outright failure with a verified repair; the
+second (§3.3) is a pair of implicit assumptions in the informal complexity
+discussion, surfaced as explicit hypotheses with executable witnesses.
+
+---
+
+# Finding 1: Theorem 5.2.2 fails as stated
 
 **Paper:** Package Managers à la Carte: A Formal Model of Dependency
 Resolution (Gibb, Ferris, Allsopp, Gazagnaire, Madhavapeddy;
@@ -132,3 +141,70 @@ over Definitions 4.4.3(a)–(d) — could differ from the authors' intent.
 The counterexample, however, violates the carried-over Definition
 4.4.3(b) (parameterised dependency closure) directly, which any
 reasonable reading retains.
+
+---
+
+# Finding 2: two implicit assumptions in §3.3's "greedy suffices"
+
+Section 3.3 claims that restricting version constraints to minimum bounds
+(approach 1, Go's MVS) makes resolution a linear-time graph traversal,
+that "a greedy algorithm suffices", and that "lock files are unnecessary
+under MVS, where the resolution is determined by the minimum bounds
+alone". Mechanising this (src/MinVersion.dfy, lemmas/MinVersionLemmas.dfy)
+confirmed the claims — under two qualifications the paper does not state.
+
+## 2a. Solvability requires an un-upgradable root
+
+"Greedy suffices" implicitly means *every well-formed instance is
+solvable* — there is nothing to backtrack over. That is false if a
+dependency chain can demand the root's own name at a higher version:
+
+```
+root = a@1;   a@1 →min b ≥ 1;   b@1 →min a ≥ 2
+```
+
+Root inclusion forces a@1 into the resolution; version uniqueness then
+forbids a@2; the instance has **no valid resolution at all**
+(`TestRootSelfUpgradeUnsat` confirms by exhaustive search over the core
+reduction). Go avoids this because the main module is special-cased as
+not upgradable; the paper's synthetic query root avoids it because the
+query root's name is fresh. The mechanised solvability theorem
+(`MvsValid`) carries this as the explicit `FreshRootName` hypothesis.
+
+## 2b. Determinism holds for the canonical algorithm — minimality does not
+
+A naive in-place greedy (upgrade a package when a higher bound appears)
+is **order-dependent** in this calculus: an early-processed version can
+contribute a bound and then be superseded by a version that no longer
+requires it. Determinism — the lock-file claim — is recovered by Cox's
+actual MVS semantics, mechanised here as a least-fixpoint *visited set*
+(unique by leastness, `MvsDeterministic`) followed by per-name maxima.
+But that algorithm keeps the bounds of superseded versions, so the
+canonical answer is **not pointwise-minimal** among valid resolutions:
+
+```
+root →min n ≥ 1, m ≥ 1, q ≥ 1;   n@1 →min m ≥ 5;   q@1 →min n ≥ 2
+```
+
+The canonical answer is {root, n@2, m@5, q@1} — m@5 justified only by the
+superseded n@1 — while {root, n@2, m@1, q@1} is also valid
+(`TestStaleBounds` exhibits both). So within the paper's min-bound
+calculus, "determined by the minimum bounds alone" is a property of *the
+algorithm's least-fixpoint semantics*, not a uniqueness property of valid
+resolutions; determinism and minimality genuinely trade off. (This
+mirrors Go's actual behaviour: superseded module versions' requirements
+still participate in the build list.)
+
+## What is proved for §3.3
+
+| Claim | Lemma |
+|---|---|
+| greedy suffices / always solvable (approach 1) | `MvsVisited` (verified terminating method) + `MvsValid` |
+| lock files unnecessary: answer is a function of the bounds | `MvsDeterministic` (least visited set is unique) |
+| any version above the maximum of the bounds satisfies dependers | `UpgradeToleratesBounds` |
+| min-bounds are the ≥-fragment of §3.2, hence reduce to the core | `MinVfEquiv`, `MinToCoreCorrect` (via Theorem 3.2.7) |
+| graph traversal suffices without uniqueness (approach 2) | `MultiResolve` (verified terminating method) |
+| approach 2 = Concurrent calculus at identity granularity | `MultiToConcurrentIdentity`, `ConcurrentToMulti` |
+
+Complexity bounds (the O(·) statements) are not mechanised; the verified
+methods are worklist graph traversals matching the claimed shape.
