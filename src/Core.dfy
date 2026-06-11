@@ -34,7 +34,9 @@ module Core {
   //   - OrName / NegName: the Tseitin-style disjunction packages and the
   //     negated-atom conflict packages of the package formula reduction
   //     (Definition 4.5.4). These embed formulae in names, so PFormula is
-  //     declared here, mutually recursive with Name.
+  //     declared here, mutually recursive with Name;
+  //   - GlobalVarName / LocalVarName: the variable packages of the
+  //     variable formula reduction (Definition 4.6.3).
   datatype Name =
     | Atom(id: string)
     | RootName
@@ -47,6 +49,8 @@ module Core {
     | ProviderName(vdepender: Package, vname: Name)
     | OrName(oleft: PFormula, oright: PFormula)
     | NegName(nbase: Name, nscope: set<Version>)
+    | GlobalVarName(gname: string)
+    | LocalVarName(lowner: Package, lname: string)
 
   // Definition 4.5.1(a): package formulae ψ ::= (m, S) | ψ∧ψ | ψ∨ψ | ¬ψ.
   // Declared here (rather than in PackageFormulae) because the reduction's

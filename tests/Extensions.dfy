@@ -245,4 +245,31 @@ module ExtensionTests {
     expect !ValidVarFormResolution({a1, tst1}, {(a1, withTest)}, a1, {a1}, testsOn);
     expect ValidVarFormResolution({a1, tst1}, {(a1, withTest)}, a1, {a1}, testsOff);
   }
+
+  // Definition 4.6.3 / Theorems 4.6.4–4.6.5 executed: the os-filtered
+  // dependency reduced to the core, under both assignments.
+  method {:test} TestVariableFormulaReduction() {
+    var a1, foo1 := P("a", 1), P("foo", 1);
+    var repo := {a1, foo1};
+    var LINUX: VarValue := 0;
+    var WINDOWS: VarValue := 1;
+    var univ: VarUniverse := {(GlobalVar("os"), LINUX), (GlobalVar("os"), WINDOWS)};
+    var filtered := VfOr(VfNot(VfGlobal("os", Eq, LINUX)),
+                         VfAnd(VfAtom(Atom("foo"), {1}), VfGlobal("os", Eq, LINUX)));
+    var vdeps: VFormDepRel := {(a1, filtered)};
+    var onLinux: Assignment := map[GlobalVar("os") := LINUX];
+    var onWindows: Assignment := map[GlobalVar("os") := WINDOWS];
+
+    // Theorem 4.6.5's construction yields valid core resolutions of the
+    // reduced instance for both platforms.
+    var r1 := VarBuildCore({a1, foo1}, onLinux, vdeps, univ);
+    expect ValidResolution(VarReduceRepo(repo, vdeps, univ), VarReduceDeps(vdeps, univ), a1, r1);
+    var r2 := VarBuildCore({a1}, onWindows, vdeps, univ);
+    expect ValidResolution(VarReduceRepo(repo, vdeps, univ), VarReduceDeps(vdeps, univ), a1, r2);
+
+    // Theorem 4.6.4's extraction recovers the resolution and assignment.
+    expect r1 * repo == {a1, foo1};
+    expect r1 * VarPkgsUniverse(univ) == {Package(GlobalVarName("os"), LINUX)};
+    expect r2 * repo == {a1};
+  }
 }

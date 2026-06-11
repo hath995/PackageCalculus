@@ -16,9 +16,11 @@
 // pattern, expressed as ¬(os = linux) ∨ (foo ∧ os = linux).
 
 include "Core.dfy"
+include "PackageFormulae.dfy"
 
 module VariableFormulae {
   import opened Core
+  import opened PackageFormulae
 
   // Definition 4.6.1(a): values W (totally ordered), global variables G,
   // and local variables P × L; the assignment function α.
@@ -79,5 +81,118 @@ module VariableFormulae {
     && RootInclusion(root, r)
     && VFormClosure(vdeps, r, asg)
     && VersionUniqueness(r)
+  }
+
+  // ---------------------------------------------------------------------
+  // The reduction to the core (Definition 4.6.3).
+  //
+  // Variable comparisons compile to package formula atoms over synthetic
+  // *variable packages* — one package name per variable, whose versions
+  // are the variable's existing values (the 𝒲 of Definition 4.6.1(a)) —
+  // and the result is reduced by the package formula reduction of §4.5.
+  // The paper encodes negated comparisons with complement operators; we
+  // keep PNot and let §4.5's conflict encoding handle it, which matches
+  // the satisfaction semantics above (a comparison on an unassigned
+  // variable is false, so its negation holds).
+  // ---------------------------------------------------------------------
+
+  // The values of each variable that exist.
+  type VarUniverse = set<(VarKey, VarValue)>
+
+  function VKeyName(k: VarKey): Name {
+    match k
+    case GlobalVar(g) => GlobalVarName(g)
+    case LocalVar(p, l) => LocalVarName(p, l)
+  }
+
+  function KeyOf(n: Name): VarKey
+    requires n.GlobalVarName? || n.LocalVarName?
+  {
+    if n.GlobalVarName? then GlobalVar(n.gname) else LocalVar(n.lowner, n.lname)
+  }
+
+  // ⟦ρ w⟧ against the variable's existing values.
+  function CmpVals(univ: VarUniverse, k: VarKey, op: CmpOp, w: VarValue): set<VarValue> {
+    set e | e in univ && e.0 == k && CmpHolds(op, e.1, w) :: e.1
+  }
+
+  // Definition 4.6.3(b), as a compilation into the §4.5 formula language.
+  function Compile(f: VForm, owner: Package, univ: VarUniverse): PFormula {
+    match f
+    case VfAtom(n, vs) => PAtom(n, vs)
+    case VfAnd(a, b) => PAnd(Compile(a, owner, univ), Compile(b, owner, univ))
+    case VfOr(a, b) => POr(Compile(a, owner, univ), Compile(b, owner, univ))
+    case VfNot(g) => PNot(Compile(g, owner, univ))
+    case VfGlobal(g, op, w) =>
+      PAtom(GlobalVarName(g), CmpVals(univ, GlobalVar(g), op, w))
+    case VfLocal(l, op, w) =>
+      PAtom(LocalVarName(owner, l), CmpVals(univ, LocalVar(owner, l), op, w))
+  }
+
+  function CompileDeps(vdeps: VFormDepRel, univ: VarUniverse): PfDepRel {
+    set e | e in vdeps :: (e.0, Compile(e.1, e.0, univ))
+  }
+
+  // Definition 4.6.3(a)(i)/(ii): the variable packages.
+  function VarPkgsUniverse(univ: VarUniverse): set<Package> {
+    set e | e in univ :: Package(VKeyName(e.0), e.1)
+  }
+
+  // An assignment as a set of selected variable packages, and back.
+  function AsgPkgs(asg: Assignment): set<Package> {
+    set k | k in asg :: Package(VKeyName(k), asg[k])
+  }
+
+  function AsgOf(r: set<Package>): Assignment
+    requires VersionUniqueness(r)
+  {
+    map p | p in r && (p.name.GlobalVarName? || p.name.LocalVarName?) ::
+      KeyOf(p.name) := p.version
+  }
+
+  // Freshness and well-formedness for the reduction.
+  predicate PlainVForm(f: VForm) {
+    match f
+    case VfAtom(n, _) =>
+      !n.OrName? && !n.NegName? && !n.GlobalVarName? && !n.LocalVarName?
+    case VfAnd(a, b) => PlainVForm(a) && PlainVForm(b)
+    case VfOr(a, b) => PlainVForm(a) && PlainVForm(b)
+    case VfNot(g) => PlainVForm(g)
+    case VfGlobal(_, _, _) => true
+    case VfLocal(_, _, _) => true
+  }
+
+  predicate PlainVarInstance(repo: set<Package>, vdeps: VFormDepRel) {
+    (forall p | p in repo ::
+       !p.name.OrName? && !p.name.NegName?
+       && !p.name.GlobalVarName? && !p.name.LocalVarName?)
+    && (forall e | e in vdeps :: e.0 in repo && PlainVForm(e.1))
+  }
+
+  // The assignment respects the value universe.
+  predicate AsgInUniverse(asg: Assignment, univ: VarUniverse) {
+    forall k | k in asg :: (k, asg[k]) in univ
+  }
+
+  // Definition 4.6.3: the composed reduction — add the variable packages
+  // to the repository, compile the formulae, and apply the §4.5 reduction.
+  function VarReduceRepo(repo: set<Package>, vdeps: VFormDepRel, univ: VarUniverse): set<Package> {
+    PfReduceRepo(repo + VarPkgsUniverse(univ), CompileDeps(vdeps, univ))
+  }
+
+  function VarReduceDeps(vdeps: VFormDepRel, univ: VarUniverse): DepRel {
+    PfReduceDeps(CompileDeps(vdeps, univ))
+  }
+
+  // The constructions of Theorems 4.6.4 and 4.6.5: a variable-calculus
+  // resolution pairs with its assignment's packages, and conversely the
+  // assignment is read off the selected variable packages.
+  function VarBuildPf(rv: set<Package>, asg: Assignment): set<Package> {
+    rv + AsgPkgs(asg)
+  }
+
+  function VarBuildCore(rv: set<Package>, asg: Assignment,
+                        vdeps: VFormDepRel, univ: VarUniverse): set<Package> {
+    PfBuildCore(VarBuildPf(rv, asg), CompileDeps(vdeps, univ))
   }
 }
