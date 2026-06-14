@@ -1,0 +1,1249 @@
+
+
+※ recap: Mechanising the Package Calculus paper in Dafny: all theorems now verified or (5.2.2) refuted with executable counterexample plus a proven repaired version, documented in FINDINGS.md; 21 tests pass. Nothing pending; optional next step is the reduction-level repair. (disable recaps in /config)
+
+❯ what sort of features in this calculus would be useful for a package manager  
+  for Dafny?                                                                    
+
+● Fun question — and Dafny is actually an unusually interesting fit for this
+  calculus, because verification changes which extensions matter. Here's my
+  read, mapping the paper's axes onto what a Dafny package manager would
+  actually face.
+
+  Where Dafny sits on the paper's spectrum (§3.3)
+
+  Dafny has the OCaml problem, but worse. In OCaml, any API change is
+  potentially breaking; in Dafny, even proof-irrelevant-looking changes break
+  downstream verification — a changed function body alters what callers see
+  through revealed definitions, triggers shift, resource limits get exceeded.
+  Semantic versioning can't honestly promise "minor = compatible" when
+  compatibility includes "your proofs still go through." So:
+
+  - MVS is out (it relies on semver discipline Dafny can't have), and
+  upper-bound-free constraints are risky.
+  - That pushes Dafny to the opam end: version uniqueness, full version formulae
+  (§3.2), NP-complete resolution, a curated registry with reverse-dependency 
+  re-verification on new releases — opam's model, except the reverse-dependency
+  check is dafny verify, which is a much stronger and more meaningful
+  compatibility check than OCaml's type-level one. The calculus's core + version
+  formula layer is exactly this, and both are mechanised here.
+  - Concurrent versions (§4.2) and peer deps (§4.3) are the extensions to skip.
+  Dafny's module namespace is flat per program and there's no name-mangling
+  story for linking two versions of Std into one verification run. Cargo's trick
+  doesn't transfer.
+
+  The extensions that map surprisingly well
+
+  Virtual packages (§4.7) ≈ abstract modules. Dafny has a language-level notion
+  the other ecosystems fake: a package can depend on an abstract module 
+  signature, and any package providing a concrete refinement satisfies it.
+  That's literally the provides relation — depend on "ordered-map-interface"; 
+  provided by red-black-tree-pkg or avl-pkg. Also the toolchain itself: a
+  dependency on smt-solver provided by z3 or cvc5. This is probably the
+  highest-value "exotic" extension for Dafny.
+
+  Variable formulae (§4.6) for compilation targets and the toolchain. A Dafny
+  package compiles to C#, Java, Go, JS, Python — :extern dependencies are
+  inherently target-conditional. That's opam's os-distribution pattern verbatim:
+  ¬(target = java) ∨ java-runtime-shim. Global variables for dafny-version and
+  solver-version matter more than in any mainstream ecosystem, because proofs
+  are brittle against both — the toolchain version belongs inside resolution,
+  not outside it. Local variables give you with-test / with-docs dependency
+  groups for free.
+
+  Features (§4.4) for trust levels. A genuinely Dafny-specific use: feature
+  flags like axiom-free or assume-free selecting the fully-verified subset of a
+  library versus the portion that relies on {:axiom}/:extern trust. Feature
+  unification has the right semantics — if anything in your closure demands the
+  verified-only build of a dependency, everyone gets it.
+
+  Singular dependencies (§4.9) + the build graph (§4.8) for reproducible 
+  verification. Lockfiles aren't just nice for Dafny, they're what makes a
+  verification cache sound: "this module verified" is only meaningful relative
+  to the exact text of every dependee and the exact toolchain. A lockfile is a
+  singular-dependency instance (the embedding is proved here), and Nix-style
+  verification-cache substitution — skip re-verifying dependencies whose
+  (content hash, toolchain) pair is already certified — is the analogue of
+  binary caching. The build graph is your verification order.
+
+  Conflicts (§4.1), modestly: two packages exporting the same top-level module
+  name, or demanding incompatible global flags (--unicode-char, type-system
+  mode), genuinely can't coexist.
+
+  The self-hosting punchline
+
+  A Dafny package manager should be written in Dafny — and this repo is most of
+  its verified core. The validity checker is compiled and executable; the
+  reductions are proven compilation passes, so the resolver only ever needs to
+  solve core instances; and Appendix C's SAT encoding is verified
+  (EncodeSound/EncodeComplete), with Dafny already shipping Z3. The pipeline
+  "parse manifest → lower extensions to core (proven) → encode to SAT (proven) →
+  ask the Z3 you already bundle → decode (proven)" would make it the first
+  package manager whose resolver is verified end-to-end against its own
+  semantics.
+
+  If you wanted to prototype that, the missing pieces are all at the edges, not
+  the middle: a manifest format, a registry, and a content-hashing scheme for
+  the verification cache — the formal core is sitting in src/.
+
+✻ Baked for 1m 50s
+
+❯ what if we had a package system that assigned a version to a new version      
+  based on how compatible it is to the previous version. let's say that it only 
+  adds function or definitions then it be fully compatible. but if a function   
+  signature changed in types it would be Marked as incompatible or if the       
+  function preconditions were stronger than before or if the post conditions    
+  got weaker?                                                                   
+
+● You've essentially re-invented behavioral subtyping (Liskov substitution)
+  applied to releases — and Dafny is the one ecosystem where this idea actually
+  closes, because the compatibility judgment is itself a verification condition.
+  "Is pre_old ⇒ pre_new, and does post_new ⇒ post_old under pre_old?" — those
+  are formulas you can hand to the verifier you already have. Elm does this for
+  types (the compiler computes the semver bump for you); your proposal is "Elm,
+  but for contracts." Your variance directions are exactly right, and they have
+  a useful converse: a release that weakens preconditions or strengthens
+  postconditions is also fully compatible, not just additions.
+
+  How it lands in the calculus we mechanised:
+
+  It rehabilitates the tractable end of §3.3 for Dafny. Earlier I argued Dafny
+  must sit at the opam end — NP-complete resolution, no semver — because
+  "compatible" can't be promised socially. Your scheme replaces the social
+  promise with a theorem. The paper's approach (1) — restrict constraints to
+  minimum bounds, get linear-time MVS-style resolution — is sound exactly when
+  versions above the bound really are substitutable, which Go assumes and your
+  checker would prove. And the granularity function g of §4.2 (already in the
+  mechanisation) is precisely your compatibility class: g(v) = number of 
+  proven-incompatible steps before v. Checking only against the immediate
+  predecessor suffices, because your relation is transitive — implication chains
+  compose — so one VC set per release certifies compatibility with the whole
+  class.
+
+  What "compatible" has to mean in Dafny, beyond your three rules. This is where
+  the idea gets sharp teeth, because several Dafny-specific things silently
+  belong to the spec surface:
+
+  - Transparent function bodies. Dafny functions are revealed by default;
+  callers' proofs can depend on the body, so a body change with identical
+  contracts is still breaking — unless the checker proves extensional equality
+  (∀x · f_old(x) == f_new(x), another VC) or the ecosystem adopts
+  opaque-plus-contract discipline, with export sets making the spec surface
+  explicit.
+  - Datatypes are nearly frozen within a class. Adding a constructor breaks
+  every exhaustive match and every case-analysis lemma downstream. Additions are
+  not always compatible — that also covers names colliding with clients' import
+  opened.
+  - Frames are contracts too. A grown reads/modifies clause breaks callers'
+  framing arguments; frames must shrink or stay equal, same as preconditions.
+  - Lemmas are specs. Weakening a lemma's conclusion or strengthening its
+  hypotheses is breaking by exactly your rule — lemmas are just ghost methods.
+  - The trust base needs its own gate. A "compatible" release that adds an
+  {:axiom}, assume, or :extern can make clients prove more than before —
+  including, in the worst case, false. Pre/post variance doesn't see that; the
+  checker should flag any growth of the unverified surface as at least a major
+  bump.
+
+  One honest caveat: spec-level compatibility guarantees clients remain
+  logically verifiable, not that their proofs replay — triggers shift, resource
+  limits get crossed. So the guarantee is "no client is wrong now," not "no
+  client needs proof repair." Practically that means pairing auto-versioning
+  with lockfiles for CI (the §4.9 singular instance) while letting dev builds
+  float within a compatibility class, and the conservative failure mode is
+  benign: when the verifier can't prove compatibility, you bump major — never
+  unsound, just occasionally over-cautious.
+
+  There's also a neat expressivity bonus: since classes are machine-checked, you
+  could safely do what Go does — treat distinct compatibility classes as
+  distinct package names — and then the Concurrent calculus (§4.2, fully proved
+  here) applies with g = class, if Dafny ever grew a story for co-existing
+  module instances.
+
+  If you want to push this into the repo, the natural next artifact is the one
+  piece of §3.3 we haven't mechanised: define min-bound dependencies over
+  compatibility classes, implement the greedy MVS-style resolver, and prove it
+  produces valid resolutions — making your versioning scheme's payoff
+  (linear-time, lockfile-optional resolution) a verified theorem rather than a
+  slogan. The substitutability side ("a class-compatible upgrade preserves
+  client spec-validity") lives at the program-semantics level the paper
+  deliberately doesn't model, but the resolution side is squarely provable with
+  what we have. Happy to build it if you'd like.
+
+✻ Crunched for 1m 31s
+
+※ recap: We're mechanising the Package Calculus paper in Dafny; all theorems are now proved or repaired, tests pass. Last topic: auto-assigned compatibility versions for a Dafny package manager. Next action: say if I should build the verified MVS resolver. (disable recaps in /config)
+
+❯ save these last two responses to a related work file in this repo. Then       
+  figure out what needs to be proved for the unresolved 3.3 section             
+
+● Two tasks: save the design discussion, then mechanise §3.3. First the
+  related-work file:
+
+● Write(RELATED-WORK.md)
+  ⎿  Wrote 163 lines to RELATED-WORK.md
+         afnysign notes: the Package Calculus and a package manager for D
+       2 
+         o threads: design discussions on applying this mechanisation. Tw
+       4 which of the paper's extensions a Dafny package manager should a
+         dopt, and a
+         GS.md andfor contract-derived version numbering. See also FINDIN
+       6 README.md for what is formally verified in this repository.
+       8 ## 1. Which calculus features fit a Dafny package manager?
+       9 
+      10 Dafny is an unusually interesting fit for this calculus, because
+     … +222 lines (ctrl+o to expand)
+
+● Write(src\MinVersion.dfy)
+  ⎿  Wrote 215 lines to src\MinVersion.dfy
+       2 // MinVersion.dfy — The two tractable restrictions of §3.3.
+         s (Go'soach (1): version constraints restricted to minimum bound
+       4 // minimum version selection). A dependency min(m, l) is satisfi
+       5 // selected version of m at or above l; the dependency closure c
+         ondition of
+         ueness istion 3.1.3(b) is replaced accordingly, and version uniq
+         ame maximaesolution reduces to a reachability closure plus per-n
+       8 // — Cox's MVS algorithm — implemented and verified here.
+      10 // Approach (2): version uniqueness removed (npm/Nix-style dupli
+         cation).
+     … +251 lines (ctrl+o to expand)
+
+● PowerShell(dafny verify src/MinVersion.dfy --verification-time-limit 120)
+  ⎿  Error: Exit code 4
+     src\MinVersion.dfy(130,25): Error: assertion might not hold
+         |
+     130 |         assert v in s && forall w | w in s :: w <= v;
+         |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+     src\MinVersion.dfy(132,25): Error: assertion might not hold
+         |
+     132 |         assert x in s && forall w | w in s :: w <= x;
+         |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     … +13 lines (ctrl+o to expand)
+
+● Update(src\MinVersion.dfy)  ⎿  Added 1 line
+      126      if s != {x} {
+      127        MaxExists(s - {x});
+      128        var v :| v in s - {x} && forall w | w in s - {x} :: w <=
+            v;
+      129 +      assert forall w | w in s :: w == x || w in s - {x};     
+      130        if x <= v {
+      131          assert v in s && forall w | w in s :: w <= v;
+      132        } else {
+
+● Update(src\MinVersion.dfy)
+  ⎿  Added 9 lines, removed 1 line
+      151      set q | q in s && q.name == m :: q.version
+      152    }
+      153  
+      154 +  // The maximum visited version of q's name.                 
+      155 +  function NameMaxIn(visited: set<Package>, q: Package): Packa
+          +ge                                                            
+      156 +    requires q in visited                                     
+      157 +  {                                                           
+      158 +    assert q.version in VersionsOfName(visited, q.name);      
+      159 +    Package(q.name, SetMax(VersionsOfName(visited, q.name)))  
+      160 +  }                                                           
+      161 +                                                              
+      162    // The MVS resolution: each visited name at the maximum of i
+           ts visited
+      163    // versions (the maximum of all minimum bounds).
+      164    function MvsOf(visited: set<Package>): set<Package> {
+      157 -    set q | q in visited :: Package(q.name, SetMax(VersionsOfN
+          -ame(visited, q.name)))                                        
+      165 +    set q | q in visited :: NameMaxIn(visited, q)             
+      166    }
+      167  
+      168    // ---------------------------------------------------------
+           ------------
+
+● PowerShell(dafny verify src/MinVersion.dfy --verification-time-limit 120)
+  ⎿  Dafny program verifier finished with 7 verified, 0 errors
+  ⎿  (timeout 10m)
+
+● All algorithms verified. Now the §3.3 theorems:
+
+● Write(lemmas\MinVersionLemmas.dfy)
+  ⎿  Wrote 267 lines to lemmas\MinVersionLemmas.dfy
+       2 // MinVersionLemmas.dfy — Proofs for §3.3.
+       3 // Approach (1), minimum bounds:
+         , per-namelid          — the canonical greedy (least visited set
+       5 //                       maxima) yields a valid resolution: gree
+       6 //                       no backtracking, every well-formed inst
+         ance with a
+       8 //   MvsDeterministic  — the least visited set is unique, so the
+          resolution
+         ne ("lock                is determined by the minimum bounds alo
+      10 //                       files are unnecessary under MVS").
+     … +320 lines (ctrl+o to expand)
+
+● PowerShell(dafny verify lemmas/MinVersionLemmas.dfy --verification-time-limit
+            120)
+  ⎿  Dafny program verifier finished with 11 verified, 0 errors
+  ⎿  (timeout 10m)
+
+● Write(tests\MinVersionTests.dfy)
+  ⎿  Wrote 105 lines to tests\MinVersionTests.dfy
+         `dafny test`.Tests.dfy — Executable examples for §3.3, run with 
+       3 //   TestMvsBasic           — minimum-bound resolution by the ca
+       4 //                            greedy (least visited set + per-na
+       5 //   TestStaleBounds        — determinism vs minimality: the can
+         onical MVS
+          superseded                   answer keeps bounds contributed by
+         lid                           versions, so a strictly smaller va
+       9 //   TestRootSelfUpgradeUnsat — the fresh-root hypothesis is nec
+      10 //                            a dependency chain demanding the r
+         oot's own
+     … +116 lines (ctrl+o to expand)
+
+● PowerShell(dafny test tests/MinVersionTests.dfy --verification-time-limit 120)
+  ⎿  Dafny program verifier finished with 4 verified, 0 errors
+     MinVersionTests.TestMvsBasic: PASSED
+     MinVersionTests.TestStaleBounds: PASSED
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● All passing. Now documenting the two §3.3 findings and updating the README:
+
+● Update(FINDINGS.md)
+  ⎿  Added 10 lines, removed 1 line
+       1 -# Finding: Theorem 5.2.2 of "Package Managers à la Carte" fails
+         - as stated                                                     
+       1 +# Findings from mechanising "Package Managers à la Carte"      
+       2  
+       3 +Two of the paper's claims needed qualification when machine-che
+         +cked. The                                                      
+       4 +first (Theorem 5.2.2) is an outright failure with a verified re
+         +pair; the                                                      
+       5 +second (§3.3) is a pair of implicit assumptions in the informal
+         + complexity                                                    
+       6 +discussion, surfaced as explicit hypotheses with executable wit
+         +nesses.                                                        
+       7 +                                                               
+       8 +---                                                            
+       9 +                                                               
+      10 +# Finding 1: Theorem 5.2.2 fails as stated                     
+      11 +                                                               
+      12  **Paper:** Package Managers à la Carte: A Formal Model of Depen
+          dency
+      13  Resolution (Gibb, Ferris, Allsopp, Gazagnaire, Madhavapeddy;
+      14  arXiv:2602.18602v1).
+
+● Update(FINDINGS.md)
+  ⎿  Added 67 lines
+      141  The counterexample, however, violates the carried-over Definit
+           ion
+      142  4.4.3(b) (parameterised dependency closure) directly, which an
+           y
+      143  reasonable reading retains.
+      144 +                                                              
+      145 +---                                                           
+      146 +                                                              
+      147 +# Finding 2: two implicit assumptions in §3.3's "greedy suffic
+          +es"                                                           
+      148 +                                                              
+      149 +Section 3.3 claims that restricting version constraints to min
+          +imum bounds                                                   
+      150 +(approach 1, Go's MVS) makes resolution a linear-time graph tr
+          +aversal,                                                      
+      151 +that "a greedy algorithm suffices", and that "lock files are u
+          +nnecessary                                                    
+      152 +under MVS, where the resolution is determined by the minimum b
+          +ounds                                                         
+      153 +alone". Mechanising this (src/MinVersion.dfy, lemmas/MinVersio
+          +nLemmas.dfy)                                                  
+      154 +confirmed the claims — under two qualifications the paper does
+          + not state.                                                   
+      155 +                                                              
+      156 +## 2a. Solvability requires an un-upgradable root             
+      157 +                                                              
+      158 +"Greedy suffices" implicitly means *every well-formed instance
+          + is                                                           
+      159 +solvable* — there is nothing to backtrack over. That is false 
+          +if a                                                          
+      160 +dependency chain can demand the root's own name at a higher ve
+          +rsion:                                                        
+      161 +                                                              
+      162 +```                                                           
+      163 +root = a@1;   a@1 →min b ≥ 1;   b@1 →min a ≥ 2                
+      164 +```                                                           
+      165 +                                                              
+      166 +Root inclusion forces a@1 into the resolution; version uniquen
+          +ess then                                                      
+      167 +forbids a@2; the instance has **no valid resolution at all**  
+      168 +(`TestRootSelfUpgradeUnsat` confirms by exhaustive search over
+          + the core                                                     
+      169 +reduction). Go avoids this because the main module is special-
+          +cased as                                                      
+      170 +not upgradable; the paper's synthetic query root avoids it bec
+          +ause the                                                      
+      171 +query root's name is fresh. The mechanised solvability theorem
+      172 +(`MvsValid`) carries this as the explicit `FreshRootName` hypo
+          +thesis.                                                       
+      173 +                                                              
+      174 +## 2b. Determinism holds for the canonical algorithm — minimal
+          +ity does not                                                  
+      175 +                                                              
+      176 +A naive in-place greedy (upgrade a package when a higher bound
+          + appears)                                                     
+      177 +is **order-dependent** in this calculus: an early-processed ve
+          +rsion can                                                     
+      178 +contribute a bound and then be superseded by a version that no
+          + longer                                                       
+      179 +requires it. Determinism — the lock-file claim — is recovered 
+          +by Cox's                                                      
+      180 +actual MVS semantics, mechanised here as a least-fixpoint *vis
+          +ited set*                                                     
+      181 +(unique by leastness, `MvsDeterministic`) followed by per-name
+          + maxima.                                                      
+      182 +But that algorithm keeps the bounds of superseded versions, so
+          + the                                                          
+      183 +canonical answer is **not pointwise-minimal** among valid reso
+          +lutions:                                                      
+      184 +                                                              
+      185 +```                                                           
+      186 +root →min n ≥ 1, m ≥ 1, q ≥ 1;   n@1 →min m ≥ 5;   q@1 →min n 
+          +≥ 2                                                           
+      187 +```                                                           
+      188 +                                                              
+      189 +The canonical answer is {root, n@2, m@5, q@1} — m@5 justified 
+          +only by the                                                   
+      190 +superseded n@1 — while {root, n@2, m@1, q@1} is also valid    
+      191 +(`TestStaleBounds` exhibits both). So within the paper's min-b
+          +ound                                                          
+      192 +calculus, "determined by the minimum bounds alone" is a proper
+          +ty of *the                                                    
+      193 +algorithm's least-fixpoint semantics*, not a uniqueness proper
+          +ty of valid                                                   
+      194 +resolutions; determinism and minimality genuinely trade off. (
+          +This                                                          
+      195 +mirrors Go's actual behaviour: superseded module versions' req
+          +uirements                                                     
+      196 +still participate in the build list.)                         
+      197 +                                                              
+      198 +## What is proved for §3.3                                    
+      199 +                                                              
+      200 +| Claim | Lemma |                                             
+      201 +|---|---|                                                     
+      202 +| greedy suffices / always solvable (approach 1) | `MvsVisited
+          +` (verified terminating method) + `MvsValid` |                
+      203 +| lock files unnecessary: answer is a function of the bounds |
+          + `MvsDeterministic` (least visited set is unique) |           
+      204 +| any version above the maximum of the bounds satisfies depend
+          +ers | `UpgradeToleratesBounds` |                              
+      205 +| min-bounds are the ≥-fragment of §3.2, hence reduce to the c
+          +ore | `MinVfEquiv`, `MinToCoreCorrect` (via Theorem 3.2.7) |  
+      206 +| graph traversal suffices without uniqueness (approach 2) | `
+          +MultiResolve` (verified terminating method) |                 
+      207 +| approach 2 = Concurrent calculus at identity granularity | `
+          +MultiToConcurrentIdentity`, `ConcurrentToMulti` |             
+      208 +                                                              
+      209 +Complexity bounds (the O(·) statements) are not mechanised; th
+          +e verified                                                    
+      210 +methods are worklist graph traversals matching the claimed sha
+          +pe.                                                           
+
+● Update(README.md)
+  ⎿  Added 1 line
+      17    Core.dfy                §3.1  core calculus; Name/PFormula da
+          tatypes
+      18    Solver.dfy              exhaustive resolver with a verified e
+          xactness contract
+      19    Versions.dfy            §3.2  version/resolution orderings, V
+          ersion Formula Calculus
+      20 +  MinVersion.dfy          §3.3  minimum-bound (MVS) and uniquen
+         +ess-free resolution                                            
+      21    Conflicts.dfy           §4.1  Conflict Package Calculus + red
+          uction
+      22    Concurrent.dfy          §4.2  Concurrent Package Calculus + r
+          eduction
+      23    Peers.dfy               §4.3  Peer Package Calculus + reducti
+          on
+
+● Update(README.md)
+  ⎿  Added 2 lines
+      46  | Thm 3.2.7 | version formula reduction correct | `VfReductionC
+          orrect` (VersionsLemmas) |
+      47  | Thm 3.1.4 | NP-hardness via 3-SAT (App. B) | `SatGivesResolut
+          ion`, `ResolutionGivesSat`, `HardnessCorrect` (HardnessLemmas) 
+          |
+      48  | Thm 3.1.4 | NP membership | executable `ValidResolution`; `Al
+          lResolutions` exactness contract (Solver) |
+      49 +| §3.3 (1) | min-bound greedy suffices; lock-free determinism; 
+         +upgrade tolerance; ≥-fragment of §3.2 | `MvsVisited`+`MvsValid`
+         +, `MvsDeterministic`, `UpgradeToleratesBounds`, `MinToCoreCorre
+         +ct` (MinVersionLemmas) — needs the fresh-root hypothesis, see [
+         +FINDINGS.md](FINDINGS.md) |                                    
+      50 +| §3.3 (2) | uniqueness-free resolution is graph traversal; = C
+         +oncurrent calculus at identity g | `MultiResolve`, `MultiToConc
+         +urrentIdentity`, `ConcurrentToMulti` (MinVersionLemmas) |      
+      51  | Thm 4.1.4/4.1.5 | conflict reduction sound & complete | `Conf
+          lictReduction{Sound,Complete}` (ConflictsLemmas) |
+      52  | Thm 4.2.4/4.2.5 | concurrent versions reduction sound & compl
+          ete | `ConcReduction{Sound,Complete}` (ConcurrentLemmas) |
+      53  | Def 4.2.1 | constant g emulates the core | `CoreEmulation{For
+          ward,Backward}` (ConcurrentLemmas) |
+
+● Update(README.md)
+  ⎿  Added 10 lines, removed 4 lines
+      118  
+      119  ## Scope (what is not mechanised)
+      120  
+      121 -The §3.3 MVS/greedy complexity results, Definition C.5 (ordere
+          -d SAT), and                                                   
+      122 -the §4.9 impossibility remark (no reduction from the core to s
+          -ingular                                                       
+      123 -dependencies — a statement over all reductions). Everything st
+          -ated as a                                                     
+      124 -lemma is proved; there are no `assume` statements or axioms.  
+      121 +The asymptotic complexity bounds of §3.3 (the verified resolve
+          +rs are                                                        
+      122 +worklist graph traversals of the claimed shape, but O(·) is no
+          +t stated                                                      
+      123 +formally), Definition C.5 (ordered SAT), and the §4.9 impossib
+          +ility                                                         
+      124 +remark (no reduction from the core to singular dependencies — 
+          +a statement                                                   
+      125 +over all reductions). Everything stated as a lemma is proved; 
+          +there are                                                     
+      126 +no `assume` statements or axioms.                             
+      127  
+      128 +Design notes on applying the calculus to a Dafny package manag
+          +er,                                                           
+      129 +including a proposal for contract-derived version numbering, a
+          +re in                                                         
+      130 +[RELATED-WORK.md](RELATED-WORK.md).                           
+      131 +                                                              
+      132  ## Build & run
+      133  
+      134  Requires Dafny ≥ 4.10.
+
+● PowerShell(dafny test dfyconfig.toml)
+  ⎿  Dafny program verifier finished with 217 verified, 0 errors
+     CompositionTests.TestConcFeatFigure9: PASSED
+     CompositionTests.TestFeatureDrift: PASSED
+     … +23 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Done on both fronts. 217 obligations verified, 0 errors, 25 tests passing.
+
+  1. Design notes saved
+
+  RELATED-WORK.md now holds both discussions: which calculus extensions fit a
+  Dafny package manager (virtual packages ≈ abstract modules, variable formulae
+  for targets/toolchain, features for trust levels, singular deps for
+  verification caching, the self-hosting argument), and the contract-derived
+  versioning proposal with its Dafny-specific compatibility rules and caveats.
+  README links to it.
+
+  2. §3.3 mechanised — with two new findings
+
+  Approach (1), minimum bounds (MVS): MvsVisited is a verified terminating
+  worklist computing the least bound-closed visited set, MvsOf takes per-name
+  maxima — Cox's actual algorithm. MvsValid proves the output is always a valid
+  resolution ("greedy suffices, no backtracking"), MvsDeterministic proves the
+  answer is a function of the bounds (the "lock files are unnecessary" claim),
+  UpgradeToleratesBounds proves the "any version above the maximum of all
+  minimum bounds" sentence, and MinVfEquiv/MinToCoreCorrect show min-bounds are
+  the ≥-fragment of §3.2, reducing to the core via the already-proven Theorem
+  3.2.7.
+
+  Approach (2), no uniqueness: MultiResolve is a verified graph-traversal
+  resolver that always succeeds, and MultiToConcurrentIdentity/ConcurrentToMulti
+  prove the connection the paper implies — uniqueness-free resolution is the
+  §4.2 Concurrent calculus at identity granularity (reusing the §4.2 machinery).
+
+  The findings (documented in FINDINGS.md, now restructured with Finding 1 =
+  Theorem 5.2.2 and Finding 2 = §3.3):
+
+  - 2a — solvability needs an un-upgradable root. a@1 → b≥1 → a≥2 has no valid
+  resolution at all (root inclusion + uniqueness collide), so "greedy suffices"
+  silently assumes no dependency targets the root's name. Go special-cases its
+  main module for exactly this reason; the theorem carries it as the explicit
+  FreshRootName hypothesis, and TestRootSelfUpgradeUnsat confirms
+  unsatisfiability by exhaustive search.
+  - 2b — determinism and minimality trade off. A naive upgrade-in-place greedy
+  is order-dependent (a superseded version's bound may or may not have been
+  processed). Cox's least-fixpoint semantics restores determinism — but by
+  keeping superseded versions' bounds, so the canonical answer isn't
+  pointwise-minimal: TestStaleBounds exhibits the canonical {root, n2, m5, q1}
+  alongside the also-valid, smaller {root, n2, m1, q1}. So "the resolution is
+  determined by the minimum bounds alone" is a property of the algorithm's
+  semantics, not of the calculus's solution set.
+
+  With this, every claim in §3 of the paper is now mechanised except the literal
+  O(·) bounds — and the repo's findings file documents three places where the
+  formal treatment sharpened the paper: Theorem 5.2.2's drift, the fresh-root
+  hypothesis, and the determinism/minimality split.
+
+✻ Sautéed for 12m 59s
+
+❯ /btw is difficult to compare predicate strengths like I was suggesting?       
+  ⎿  /btw isn't available over Remote Control.
+
+※ recap: Mechanising the Package Calculus paper in Dafny: all sections now proved (217 obligations, 25 tests passing), with design notes saved and the §3.3 and Theorem 5.2.2 findings documented. Nothing pending; next step is whatever you'd like to explore.
+
+❯ is difficult to compare predicate strengths like I was suggesting?            
+
+● Short answer: the logic is exactly as hard as ordinary Dafny verification —
+  semi-decidable, usually automatic, occasionally needs a hand-written lemma —
+  and the scheme can absorb that gracefully. The genuinely annoying part isn't
+  comparing the predicates, it's getting both versions of them into one program.
+  Let me break that down.
+
+  The judgment itself is just an implication VC. forall args :: pre_old(args) 
+  ==> pre_new(args) is precisely the kind of formula Dafny discharges all day.
+  For the bulk of real contracts — bounds checks, null/validity conditions,
+  arithmetic — these sit in decidable or well-behaved SMT fragments and verify
+  instantly. Quantified specs bring the usual E-matching/trigger incompleteness,
+  but that's the same incompleteness Dafny users already live with, and the
+  failure mode is benign by design: "solver says unknown" → conservative major
+  bump. You can lose precision, never soundness.
+
+  There's a fast path that covers most of the work. Releases rarely touch most
+  contracts. Diff first: alpha-equivalent contract ASTs are compatible with zero
+  solver calls. Among the changed ones, the common edits are conjunct-level and
+  syntactically free — dropping a conjunct from requires is weakening (A ∧ B ⇒ 
+  A), adding a conjunct to ensures is strengthening. The solver only sees
+  genuine semantic rewrites, and those are a small tail.
+
+  The hard tail is real but has a native escape hatch. Implications between
+  recursive predicates — sorted_v2(s) ⇒ sorted_v1(s) where both are recursively
+  defined — typically need induction, which SMT won't find alone. Here's where
+  Dafny is uniquely positioned: the checker can emit the unproved obligation as
+  a lemma stub, and the library author proves it by hand — lemma 
+  PreStillWeaker(x) requires pre_old(x) ensures pre_new(x) — in the language
+  they already write proofs in. The compatibility claim becomes one more proof
+  obligation shipped with the release. Elm can't offer that option; Dafny can.
+  Undecidability degrades to "occasionally requires a manual lemma," which is
+  just… Dafny.
+
+  The actual engineering pain: two versions, one program. pre_old and pre_new
+  come from different snapshots of the codebase and may call helper functions
+  that themselves changed. You need to import both versions with symbols renamed
+  apart (prefix everything from v1 with Old_, say) so the implication is even
+  expressible — this is the relational-verification plumbing that tools like
+  SymDiff (differential assertion checking) built for C. It's mechanical but
+  it's the bulk of the tool. Three side-effects of that plumbing to watch:
+
+  - Shared vocabulary. If a helper predicate both contracts mention changed
+  meaning, the naive check silently compares against different definitions;
+  renaming apart makes that explicit, but then trivial-looking implications stop
+  being trivial (Old_Sorted(s) ⇒ Sorted(s) is now a real obligation, correctly
+  so).
+  - Abstraction changes. If the spec is stated over an abstract model (Repr, a
+  ghost map) whose representation changed, you need a coupling invariant
+  relating old model to new — full data-refinement territory, genuinely hard in
+  general. Pragmatic answer: if the exported model type changed, that's a
+  signature change, i.e. major bump by your own rule; only compare contracts
+  over an unchanged spec vocabulary.
+  - Heap specs. Frames compare easily when syntactic (modifies set inclusion),
+  less easily when dynamic (reads Repr); two-state postconditions need the
+  implication checked under pre_old and the old frame.
+
+  Worth noting: Dafny's module refinement already enforces a conservative cousin
+  of this (a refining module can add ensures but, IIRC, can't touch requires) —
+  so the covariant half has language precedent; the full contravariant check is
+  what the external tool adds.
+
+  So: not difficult in principle, mostly cheap in practice, occasionally
+  lemma-shaped at exactly the points where Dafny authors are already comfortable
+  writing lemmas — and the real implementation cost is version-pairing
+  plumbing, not logic.
+✻ Cooked for 1m 1s
+
+❯ since this would be a package system we would already have the previous       
+  version available, I suppose what we would do is download it and rename the   
+  modules and then create a local file with lemmas that the previous            
+  preconditions imply the new preconditions                                     
+
+● Yes — that's exactly the right architecture, and the registry having the
+  predecessor makes it self-contained. A few concrete things you'd hit building
+  it, including one non-obvious wrinkle that shapes the whole generator:
+
+  Contracts aren't first-class, so the generator must splice expressions. Dafny
+  has no requires-of(f) operator — you can't write a lemma that abstractly
+  references "f's precondition." The generated file has to copy the contract 
+  expressions out of both versions' ASTs, with the old version's symbols
+  qualified apart. So the artifact looks like:
+
+  lemma Find_PreWeakened(s: seq<int>, key: int)
+    requires Old.Lib.SortedAsc(s) && |s| > 0     // v1's requires, Old-qualified
+    ensures Lib.SortedAsc(s)                      // v2's requires
+  {}
+
+  lemma Find_PostStrengthened(s: seq<int>, key: int, idx: int)
+    requires Old.Lib.SortedAsc(s) && |s| > 0      // under the OLD precondition
+    requires PostV2(s, key, idx)                  // v2's ensures, spliced
+    ensures  PostV1(s, key, idx)                  // v1's ensures, Old-qualified
+  {}
+
+  That means the tool needs Dafny's parser (the Microsoft.Dafny API, or dafny 
+  --print of a resolved program as a poor-man's extraction) — string-level
+  diffing won't survive qualified names.
+
+  You may not even need to rename modules — wrap them. Rather than rewriting
+  module Foo to module V1_Foo and chasing every internal reference, concatenate
+  the old release's sources inside one module Old { … }. Module references
+  resolve lexically, so the old code is self-contained under Old.*, while
+  references to the shared standard library escape to the common Std — which is
+  exactly what you want, since both versions' contracts should speak a shared
+  vocabulary for Std. The fiddly residue is include directives (file-level, so
+  you concatenate first) and :extern attributes (irrelevant for
+  verification-only runs).
+
+  The failure modes compose beautifully. Signature changed in types? The
+  generated lemma doesn't even resolve — type error → major bump, no solver
+  involved. Contract textually unchanged? Skip generation entirely. Conjunct
+  dropped from requires? The lemma is A ∧ B ⇒ A, discharged instantly with the
+  empty body. Only genuine semantic rewrites reach the solver, and dafny verify 
+  compat.dfy's exit code is the bump decision.
+
+  Leave room for manual proofs without clobbering them. Dafny won't let you
+  separate a lemma's declaration from its body, so use a convention: the
+  generator emits {} bodies by default, but if the author's hand-maintained
+  compat-proofs.dfy defines Find_PreWeakened_Manual with the matching signature,
+  the generator emits { Find_PreWeakened_Manual(s, key); } instead.
+  Regeneration stays idempotent; inductive cases get human help; everything
+  remains assumption-free.
+
+  Two cases need more than the simple template. Methods with heap effects: the
+  post-comparison needs the old-state/new-state structure (old() expressions,
+  frames), so the harness is a generated method over a havocked frame rather
+  than a lemma — SymDiff-style; I'd ship v1 of the tool covering functions,
+  lemmas, and ghost predicates (where Dafny libraries keep most of their spec
+  weight) and add the heap harness second. And transparent function bodies: for
+  exported non-opaque functions whose body changed, generate ensures 
+  Old.Lib.F(x) == Lib.F(x) — body-equivalence as just another compat lemma.
+
+  The registry closes the trust loop. Don't trust the publisher's bump: the
+  compat file ships with the release and the registry re-verifies it on upload —
+  the compatibility claim becomes an auditable, machine-checked artifact
+  attached to the version, not metadata someone asserted. And that's the point
+  where it plugs into what we proved yesterday-in-this-repo: the registry
+  assigns the compatibility class, classes are the granularity function, and the
+  §3.3 results (MvsValid, MvsDeterministic) give you a verified linear-time
+  resolver over min-bounds within a class — with the fresh-root caveat already
+  built into the theorem.
+
+  If you want, I can prototype the generated-file shape as a worked example in
+  the repo — a small Old-wrapped library pair plus the compat lemmas, verifying
+  one compatible and one breaking release against each other — so the convention
+  is pinned down by something executable.
+
+✻ Brewed for 1m 33s
+
+※ recap: Mechanising the Package Calculus paper in Dafny: all theorems proved (217 obligations, 25 tests), two paper findings documented, plus Dafny package-manager design notes. Next action: prototype the contract-compatibility lemma generator example in the repo if you want it.
+
+❯ sure give it a try                                                            
+
+● I'll build the worked example under compat/: a small library in three releases
+  (v1 wrapped as the downloaded predecessor would be, v2 compatible, v3
+  breaking), the "generated" compatibility obligations, the author-maintained
+  manual proof hook, and executable breaking-witnesses.
+
+● Write(compat\SeqLibV1.dfy)
+  ⎿  Wrote 47 lines to compat\SeqLibV1.dfy
+         theSeqLibV1.dfy — release 1.0.0 of a small sequence library, as 
+       2 // compatibility checker would materialise it: the registry's pr
+       3 // sources are downloaded and concatenated inside a wrapper modu
+         le, so its
+         self.clarations live at V1.* without touching the source text it
+       5 // (A real tool would name the wrapper `Old`; the demo uses V1/V
+       6 // release pairs can coexist in one project.)
+       7 //
+       9 // See RELATED-WORK.md §2 and compat/CompatV1V2.dfy.
+      10 module V1 {
+     … +41 lines (ctrl+o to expand)
+
+● Write(compat\SeqLibV2.dfy)
+  ⎿  Wrote 66 lines to compat\SeqLibV2.dfy
+          underLibV2.dfy — release 1.1.0 (candidate): the current sources
+         patible:tibility check against V1. Four kinds of change, all com
+       4 //   - Sorted is *redefined* (adjacent → pairwise). It appears i
+         n
+         on-    IndexOf's precondition, so the checker emits a preconditi
+         induction,kening obligation V1.Sorted ⇒ V2.Sorted — which needs 
+       7 //     exercising the manual-proof hook (compat/CompatProofs.dfy
+       8 //   - Min's postcondition is *strengthened* (minimality added):
+      10 //   - Double's transparent *body is rewritten* but equivalent: 
+         the
+     … +59 lines (ctrl+o to expand)
+
+● Write(compat\SeqLibV3.dfy)
+  ⎿  Wrote 61 lines to compat\SeqLibV3.dfy
+         NG changes3.dfy — release candidate after 1.1.0, with two BREAKI
+         tnesses):ompat/CompatV2V3.dfy for the failing obligations and wi
+       3 //
+          added):ndexOf's precondition is *strengthened* (a length cap is
+       5 //     existing callers with longer sequences no longer verify.
+         xistingMin's postcondition is *weakened* (minimality dropped): e
+       8 //     callers relying on it no longer verify.
+       9 // The compatibility checker would assign this release a new maj
+      10 // version (a new compatibility class / granularity in the calcu
+         lus).
+     … +58 lines (ctrl+o to expand)
+
+● Write(compat\CompatProofs.dfy)
+  ⎿  Wrote 41 lines to compat\CompatProofs.dfy
+         ilitympatProofs.dfy — the AUTHOR-MAINTAINED file of the compatib
+         atedhecking convention. When the solver cannot discharge a gener
+       3 // obligation automatically (typically implications between recu
+       4 // predicates, which need induction), the author proves it here 
+         under the
+         mits abligation>_Manual` naming convention; the generator then e
+         `{}`.ll to the manual lemma as the obligation's body instead of 
+       7 // Regenerating the obligations never clobbers this file.
+       9 include "SeqLibV1.dfy"
+      10 include "SeqLibV2.dfy"
+     … +38 lines (ctrl+o to expand)
+
+● Write(compat\CompatV1V2.dfy)
+  ⎿  Wrote 63 lines to compat\CompatV1V2.dfy
+         theCompatV1V2.dfy — the GENERATED compatibility obligations for 
+         tten byase pair V1 → V2 (the file a checker would emit; here wri
+       3 // hand to pin down the convention; see RELATED-WORK.md §2).
+       5 // Generation rules per exported declaration:
+       6 //   - signature changed in types        → the obligation would 
+       7 //                                         resolve: automatic ma
+       8 //   - contract ASTs unchanged (over the shared vocabulary) → sk
+         ipped;
+         n:   - requires changed                  → PreWeakened obligatio
+      10 //                                           old-pre ⇒ new-pre;
+     … +71 lines (ctrl+o to expand)
+
+● Write(compat\CompatV2V3.dfy)
+  ⎿  Wrote 67 lines to compat\CompatV2V3.dfy
+          V2 → V3,V2V3.dfy — the compatibility check for the release pair
+         s Min'sh FAILS: V3 strengthens IndexOf's precondition and weaken
+       3 // postcondition. The generated obligations below do not verify 
+       4 // comments so the project stays green); instead this file prove
+         s their
+         e — andTIONS — concrete witnesses that the implications are fals
+         bump.ns them as executable tests. A checker would report: major 
+       7 //
+       9 //   // lemma IndexOf_PreWeakened(s: seq<int>, x: int)s:
+      10 //   //   requires V2.SeqLib.Sorted(s) && x in s
+     … +71 lines (ctrl+o to expand)
+
+● PowerShell(dafny verify compat/CompatV1V2.dfy --verification-time-limit 120;
+            dafny test compat/CompatV2V3.dfy --verification-time-limit 120)
+  ⎿  Dafny program verifier finished with 4 verified, 0 errors
+
+     Dafny program verifier finished with 5 verified, 0 errors
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● Both check out. Wiring into the project and docs:
+
+● Write(dfyconfig.toml)
+  ⎿  Added 1 line, removed 1 line
+      1 -includes = ["src/*.dfy", "lemmas/*.dfy", "tests/*.dfy"]         
+      1 +includes = ["src/*.dfy", "lemmas/*.dfy", "tests/*.dfy", "compat/
+        +*.dfy"]                                                         
+      2  
+      3  [options]
+      4  verification-time-limit = 120
+
+● Update(RELATED-WORK.md)
+  ⎿  Added 31 lines, removed 6 lines
+      154  benign — when the verifier can't prove compatibility, bump maj
+           or; never
+      155  unsound, occasionally over-cautious.
+      156  
+      157 -### Follow-up mechanised in this repo                         
+      157 +### Implementation sketch                                     
+      158  
+      159 -The payoff of the scheme — linear-time, lockfile-optional reso
+          -lution over                                                   
+      160 -minimum bounds — is the §3.3 material now mechanised in       
+      161 -`src/MinVersion.dfy` / `lemmas/MinVersionLemmas.dfy`; see READ
+          -ME.md and                                                     
+      162 -the §3.3 section of FINDINGS.md for what is proved and which i
+          -nformal                                                       
+      163 -claims needed qualification.                                  
+      159 +Since the registry holds the predecessor, the checker download
+          +s it, wraps                                                   
+      160 +its sources in a module (no renaming of internals needed — mod
+          +ule                                                           
+      161 +references resolve lexically, while the shared standard librar
+          +y escapes                                                     
+      162 +to the common vocabulary), and emits a file of compatibility o
+          +bligations:                                                   
+      163 +one `PreWeakened` lemma per changed `requires` (old-pre ⇒ new-
+          +pre), one                                                     
+      164 +`PostStrengthened` lemma per changed `ensures` (old-pre ∧ new-
+          +post ⇒                                                        
+      165 +old-post, with the result as a bound variable), one `BodyEquiv
+          +alent`                                                        
+      166 +lemma per rewritten transparent body. Signature changes fail t
+          +o resolve —                                                   
+      167 +automatic major; unchanged contracts are skipped; additions ca
+          +rry no                                                        
+      168 +obligation. Bodies default to `{}`; obligations the solver can
+          +not                                                           
+      169 +discharge call an author-maintained `<Obligation>_Manual` lemm
+          +a, so                                                         
+      170 +inductive cases get human proofs without regeneration clobberi
+          +ng them.                                                      
+      171 +`dafny verify` on the generated file *is* the bump decision, a
+          +nd the                                                        
+      172 +registry re-verifies it on upload, making the compatibility cl
+          +aim an                                                        
+      173 +auditable artifact.                                           
+      174 +                                                              
+      175 +### Follow-ups mechanised in this repo                        
+      176 +                                                              
+      177 +- The payoff of the scheme — linear-time, lockfile-optional re
+          +solution                                                      
+      178 +  over minimum bounds — is the §3.3 material mechanised in    
+      179 +  `src/MinVersion.dfy` / `lemmas/MinVersionLemmas.dfy`; see RE
+          +ADME.md and                                                   
+      180 +  FINDINGS.md for what is proved and which informal claims nee
+          +ded                                                           
+      181 +  qualification.                                              
+      182 +- The implementation sketch above is pinned down by a worked e
+          +xample in                                                     
+      183 +  `compat/`: a three-release library (`SeqLibV1..V3`), the gen
+          +erated                                                        
+      184 +  obligations for a compatible pair (`CompatV1V2.dfy`, includi
+          +ng a                                                          
+      185 +  redefined recursive predicate discharged through the manual-
+          +proof hook                                                    
+      186 +  in `CompatProofs.dfy`) and for a breaking pair (`CompatV2V3.
+          +dfy`, with                                                    
+      187 +  the failing obligations refuted by verified witnesses and ex
+          +ecutable                                                      
+      188 +  tests).                                                     
+
+● Update(README.md)
+  ⎿  Added 2 lines
+      32    Hardness.dfy            App B 3-SAT → resolution construction
+      33  lemmas/                 Proofs of the paper's claims (all machi
+          ne-checked)
+      34  tests/                  Executable examples from the paper (`da
+          fny test`)
+      35 +compat/                 Worked example: contract-derived versio
+         +n compatibility                                                
+      36 +                        checking for Dafny libraries (see RELAT
+         +ED-WORK.md §2)                                                 
+      37  ```
+      38  
+      39  All predicates in `src/` are compiled (non-ghost), so a candida
+          te
+
+● PowerShell(dafny test dfyconfig.toml)
+  ⎿  Dafny program verifier finished with 243 verified, 0 errors
+     CompatV2V3.TestV3BreaksIndexOfPre: PASSED
+     CompatV2V3.TestV3BreaksMinPost: PASSED
+     … +25 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+● The prototype works end-to-end — 243 obligations verified, 27 tests passing
+  project-wide. Here's what's in compat/:
+
+  The worked example
+
+  Three releases of a small sequence library:
+  - SeqLibV1.dfy — release 1.0.0, wrapped in module V1 { … } exactly as the
+  checker would materialise the downloaded predecessor (no internal renaming
+  needed — module references resolve lexically).
+  - SeqLibV2.dfy — a compatible candidate exercising all four change kinds:
+  Sorted redefined (adjacent-pairs → pairwise), Min's postcondition
+  strengthened, Double's transparent body rewritten, Max added.
+  - SeqLibV3.dfy — a breaking candidate: IndexOf's precondition strengthened
+  (|s| <= 64 cap), Min's postcondition weakened (minimality dropped).
+
+  CompatV1V2.dfy — the "generated" obligations, all verified ⟹ minor bump. It
+  pins down the convention: PreWeakened lemmas (old-pre ⇒ new-pre),
+  PostStrengthened lemmas (old-pre ∧ new-post ⇒ old-post, result spliced as a
+  bound variable r), BodyEquivalent for the rewritten body, skips for unchanged
+  contracts, nothing for additions. Two of three obligations discharge with
+  empty bodies.
+
+  CompatProofs.dfy — the manual-proof hook, used for real. The Sorted
+  redefinition is exactly the hard case we discussed: adjacent-pairs ⇒ pairwise
+  needs induction, and Z3 won't find it alone. The author supplies
+  IndexOf_PreWeakened_Manual (a five-line induction on index distance), and the
+  generated obligation's body is just a call to it. Regeneration never touches
+  this file.
+
+  CompatV2V3.dfy — the breaking pair ⟹ major bump. The two failing obligations
+  are kept as comments, and their negations are proved: verified witness lemmas
+  (exists s, x :: old-pre ∧ ¬new-pre — a sorted 65-element sequence; a
+  non-minimal element) plus the same witnesses as executable {:test}s.
+
+  Answering your original question with evidence
+
+  The example is a miniature census of difficulty: of the three V1→V2
+  obligations, two were free (conjunct-level reasoning, empty bodies) and one 
+  needed a five-line manual induction — and that one was deliberately
+  constructed to be the worst case (implication between two differently-phrased
+  recursive predicates). The breaking direction needed no solver subtlety at
+  all: refutation is just exhibiting a concrete input. So "difficult" lands
+  where predicted — rarely, identifiably (recursive predicate rewrites), and in
+  lemma-shaped form that a Dafny library author handles routinely.
+
+  Docs updated: RELATED-WORK.md §2 now carries the implementation sketch
+  (wrap-don't-rename, obligation taxonomy, _Manual convention, registry
+  re-verification) with a pointer to compat/, and the README lists the
+  directory. The piece a real tool still needs is the generator itself — the
+  Microsoft.Dafny-API pass that extracts and splices contract expressions — but
+  its output format is now specified by something that verifies.
+
+✻ Cogitated for 5m 53s
+
+※ recap: Mechanising the Package Calculus paper in Dafny: all theorems proved or refuted with verified repairs, 243 obligations and 27 tests green, plus the contract-compatibility prototype in compat/. Everything is done; next would be building the obligation generator tool.
+
+❯ If we built this infrastructure would it be worth it? Would it make the       
+  libraries easier to use? I am also imagining the version system would have to 
+  mark library upgrades as compative by lemma if a lemma is required to make    
+  existing code work, it would be considered a minor or major change?           
+● Two questions — let me take the versioning one first because it has a crisp
+  answer that I think improves your scheme, then the worth-it question.
+
+  "Compatible by lemma": minor or major?
+
+  First, a distinction that matters: whose lemma?
+
+  Publisher-side lemma (our _Manual hook): unambiguously doesn't affect the
+  bump. The bump should track whether the implication is true, not whether Z3
+  found the proof unassisted. Once IndexOf_PreWeakened is proved — by whatever
+  means — the semantic guarantee to clients is identical.
+
+  Client-side lemma — your actual question — and here's the subtlety:
+  publisher-proven compatibility does not guarantee client proofs replay
+  mechanically. Concretely, in our compat/ example: a client whose loop
+  invariant establishes adjacent-sortedness inline will, after the upgrade, face
+  a call site demanding pairwise-sortedness. The implication is true (the
+  publisher proved it!), but the client's verifier needs the same induction at
+  the call site. Semantically nothing broke; mechanically the client must add
+  one lemma call. Notice the diagnostic: if the publisher's obligation needed a 
+  manual proof, client call sites are likely to need the same bridge.
+
+  So the honest taxonomy is three-valued, and — pleasingly — semver already has
+  three digits:
+
+  - Patch: every obligation discharged with an empty body (unchanged contracts,
+  dropped conjuncts, trivial implications). Client contexts that entailed the
+  old contract entail the new one by the same shallow reasoning — no edits
+  expected.
+  - Minor = your "compatible by lemma": all obligations proved, but some needed
+  _Manual. Semantically safe — no client is wrong — but clients may need proof
+  repair. Two policies should attach to this tier: the publisher must export the
+  bridging lemmas (the compat file tells you exactly which ones — they're the
+  _Manual entries), so the client's fix is a one-line lemma call; and tooling
+  can suggest it, since the failing client obligation matches a shipped bridge
+  by shape.
+  - Major: some implication is false (witness exists) or the obligation doesn't
+  resolve (signature change).
+
+  This has a nice precedent — Rust's RFC 1105 explicitly allows "minor changes
+  that may require annotations" (new trait impls can break inference) — and it's
+  computable from the artifact we already built: the {}-body vs _Manual-body
+  distinction in the generated file is literally the patch/minor classifier.
+  It's a proxy, not a theorem about client sites (the publisher's check is one
+  fixed formula; client contexts vary), so I'd present it as: patch = "no new
+  proof obligations introduced," minor = "safe, bridging lemmas shipped," major
+  = "callers can be wrong." Resolution policy then keys off it naturally:
+  auto-float patch everywhere, float minor in dev / lock in CI, never float
+  major — and the §3.3 min-bound machinery we verified applies within whichever
+  tier you let float.
+
+  Would it be worth building?
+
+  The strongest argument: the checker is valuable before any package manager 
+  exists. Proof-library upgrades are the notorious cost center of every
+  verification ecosystem — mathlib handles it by being a monorepo with
+  continuous breakage-fixing; Coq handles it by pinning everything in the
+  Platform; Dafny users today mostly vendor and freeze, which is the same
+  admission. A standalone "spec-diff" CI bot — runs on every PR of a library
+  repo, comments "this strengthens IndexOf's precondition: breaking; this
+  strengthens Min's postcondition: safe" — needs no registry, no resolver, no
+  ecosystem buy-in, and would already pay for itself in any industrial Dafny
+  codebase. That's the incremental path: CI bot → auto-versioned registry → MVS
+  resolution, each stage useful alone.
+
+  Would it make libraries easier to use? I think the bigger effect is making
+  them safe to depend on at all. Today the rational Dafny strategy is to copy
+  library source into your repo precisely because an upgrade might cost you a
+  week of proof repair with no warning. Machine-checked compatibility classes
+  convert "upgrading is gambling" into "patch upgrades are free, minor upgrades
+  come with the exact lemmas you'll need, major upgrades are honestly labeled."
+  Secondary benefits compound: the compat file doubles as a precise
+  spec-changelog for review; the scheme pressures library authors toward
+  opaque-function-plus-contract discipline and explicit export sets (since
+  transparent bodies are effectively frozen), which improves library design
+  independently.
+
+  Honest costs: the generator is real engineering (a Microsoft.Dafny AST pass,
+  two-version plumbing, the heap-method harness, traits — months, plus tracking
+  Dafny releases); conservative false-majors will happen when authors don't
+  bother proving hard-but-true implications, inflating version numbers; and the
+  brittleness gap means even patch can't promise proofs replay (triggers,
+  resource limits) — so it needs lockfiles and verification caching alongside,
+  which we've already got the formal story for. And the Dafny ecosystem is small
+  today — but that cuts both ways: small enough that one tool plus the standard
+  library adopting it could set the convention for everything that follows.
+
+  Net: worth it, with the CI-bot subset as the place to start — and your
+  three-tier refinement is, I'd say, the right published semantics for it.
+
+✻ Crunched for 1m 57s
+
+❯ /copy                                                                         
+  ⎿  Copied to clipboard (5341 characters, 27 lines)
+     Also written to C:\Users\Aaron-pc\AppData\Local\Temp\claude\response.md
+
+❯ So lets say we have one predicate sorted which is defined one way in v1 and a 
+  different way in v2. The lemma would require the old version to remain in     
+  the code base?                                                                
+
+● No — the old declaration doesn't have to survive anywhere in the shipped code.
+  The old definition shows up in two places, and both have a way around keeping
+  it:
+
+  1. The compatibility check itself. Here both definitions genuinely must
+  coexist — that's exactly what the module V1 { … } wrapping is for. But it's a
+  transient verification environment, not the codebase: the registry
+  materialises v1 from its own archive, wraps it, verifies CompatV1V2.dfy, and
+  the v2 package ships only v2 sources. Since the registry keeps every release
+  forever, the check is reproducible on demand without v2 carrying any v1 text.
+  (Same answer as "where does the old binary live for an ABI-diff tool" — in the
+  artifact store, not in your tree.)
+
+  2. The client-facing bridge lemma — the subtler case. The naive bridge
+  V1.Sorted(s) ⇒ V2.Sorted(s) would indeed force the old predicate to stay
+  exported. But that's the wrong statement to ship. Think about what the client
+  actually has: their old proof established the old definition's content — say,
+  adjacent-sortedness from a loop invariant — not the old name. So the useful
+  bridge is stated entirely in v2's vocabulary, with the old body inlined as a
+  plain formula:
+
+  // shipped in v2, no reference to any v1 declaration
+  lemma SortedFromAdjacent(s: seq<int>)
+    requires forall i | 0 < i < |s| :: s[i-1] <= s[i]   // v1's body, as a
+  formula
+    ensures Sorted(s)                                    // v2's predicate
+
+  The old definition survives as a hypothesis formula inside one lemma — which
+  the generator can produce mechanically, since it's holding both ASTs anyway —
+  but no Sorted_v1 name pollutes the API. A publisher who wants more
+  discoverability can optionally keep a deprecated alias predicate 
+  SortedAdjacent plus the bridge; that's taste, not necessity.
+
+  One sharpening your example exposes, though. A changed predicate definition is
+  a stronger event than a changed precondition, because exported predicates
+  appear in client code at both polarities — someone requires Sorted(s), someone
+  else ensures it, someone branches on !Sorted(s). A one-directional
+  implication can't cover all of them. So the right generated obligation for an
+  exported transparent predicate whose body changed is equivalence, V1.Sorted(s)
+  <==> V2.Sorted(s) — which our adjacent/pairwise example happens to satisfy
+  (pairwise ⇒ adjacent is the trivial direction; adjacent ⇒ pairwise is the
+  induction). Our CompatV1V2.dfy only emitted the one direction that IndexOf's
+  precondition needed; a complete ruleset would emit the iff for Sorted itself.
+  And the corollary is a clean design rule for publishers: if you want to
+  genuinely change what a predicate means — not just rephrase it — don't
+  redefine the name; introduce a new predicate and migrate your own contracts to
+  it. The old name's removal (or its broken equivalence obligation) then
+  registers as the major bump it really is, and "redefinition" stops being a way
+  to silently shift meaning under every client simultaneously.
+
+  So: check environment holds both versions transiently; shipped library holds
+  only v2 plus bridge lemmas phrased in v2's own vocabulary; and predicate
+  redefinitions get held to the equivalence standard, with "new meaning = new
+  name" as the escape valve. Happy to add the Sorted equivalence obligation and
+  the v2-vocabulary bridge to the compat/ example if you want the convention
+  pinned down for that case too.
+
+✻ Churned for 1m 26s
+
+※ recap: We mechanised the Package Calculus paper in Dafny (243 obligations, 27 tests green) and prototyped contract-based version compatibility checking in compat/. Next action if you want it: add the Sorted equivalence obligation and v2-vocabulary bridge lemma to compat/.
+
+❯ so we also have a few dimensions to consider 1. Dafny versions, I think 4.10, 
+  4.11 and hopefully soon 4.12 will be released. Then secondly command line     
+  options/toggles for Dafny, how would we incorporate these into the dependency 
+  system?                                                                       
+
+● Both dimensions slot into machinery we've already mechanised — and pleasingly,
+  each one lands on a different piece of it.
+
+  The Dafny version: model the toolchain as a package
+
+  Make dafny (and z3/cvc5) ordinary packages in the repository with versions
+  4.10, 4.11, 4.12, and let libraries depend on them with version formulae
+  (§3.2). Two things fall out for free:
+
+  - Toolchain coherence is just version uniqueness. A program is verified by one
+  Dafny invocation, so every library in a resolution must agree on one
+  toolchain version — which is literally Definition 3.1.3(c) applied to the
+  dafny package. No new mechanism; the core calculus's most basic rule does the
+  work. And resolution gets to trade off jointly: if libA@2 needs dafny ≥ 4.11
+  but libB's latest only supports 4.10, the solver can fall back to libA@1 —
+  toolchain choice and library choice are one constraint problem, which is
+  exactly why Dafny lives at the NP-complete/SAT end of §3.3.
+  - Support ranges should be measured, not declared. The contract-derived
+  versioning story doesn't apply here — you can't prove dafny 4.11 ⊒ 4.10 by
+  lemma; proof brittleness across toolchain releases is empirical. So the
+  registry runs each library release against its Dafny matrix and records which
+  versions verify, generating the dafny constraint from CI fact rather than
+  author optimism. Note the support set can be non-contiguous (verifies on 4.10
+  and 4.12 but a 4.11 regression breaks it) — which is precisely why §3.2's
+  general version formulae matter over simple ranges, and that reduction is
+  proven (VfReductionCorrect).
+
+  Options and toggles: the §4.6 variable formulae, used for real
+
+  The key is to sort options into three buckets, because they want three
+  different treatments:
+
+  1. Semantics-changing, globally coherent — --unicode-char,
+  --type-system-refresh, --quantifier-syntax, --standard-libraries. These change
+  what source means, and one invocation has one setting, so the whole
+  resolution must agree. That is exactly the paper's global variable (§2.2.12's
+  os-distribution, mechanised in §4.6): manifests contribute constraints like
+  unicode-char = true or ¬(type-system = legacy) — negative constraints
+  included, since our Tseitin-backed reduction handles negated comparisons.
+  Three consequences, all already proved:
+  - coherence is enforced because the reduction turns each option into a
+  variable package whose version is its value — version uniqueness again
+  (VarReductionSound/Complete);
+  - the resolver can solve for option values: if A requires unicode-char = true
+  and B is indifferent, resolution picks true; if B requires false, you get a
+  comprehensible UNSAT instead of a mid-build mystery — the paper's "variables
+  can themselves be solved for," operational;
+  - a library can make dependencies conditional on options (¬(standard-libraries
+  = true) ∨ my-std-shim), the opam filtered-dependency pattern we tested in
+  TestVariableFormulae.
+
+  2. Verification-effort, locally scoped — --resource-limit,
+  --isolate-assertions, manual trigger style. These affect whether this
+  package's proofs go through, not what neighbors' code means. They're §4.6's
+  local variables (the with-test pattern) or plain per-package metadata; they
+  impose nothing on the rest of the closure and shouldn't enter the global
+  constraint problem.
+
+  3. Certificate-relevant — solver identity and version, rlimits actually used,
+  flags like --allow-axioms. These don't constrain resolution; they qualify what
+  "this package verified" means. They belong in the verification-cache key and
+  the lockfile: a cached certificate is (content hash, dafny version, solver 
+  version, semantic-option assignment), and substitution is only sound on exact
+  match (with rare monotone exceptions like "verified at rlimit X ⟹ fine at ≥
+  X").
+
+  The pleasing punchline
+
+  Definition 4.6.2's resolutions are pairs (R, α) — packages plus a variable 
+  assignment. So "the lockfile must record the option settings" isn't a bolt-on
+  engineering decision: in the mechanised semantics, the assignment is already
+  half of the resolution object. A Dafny lockfile is literally an (R, α) of the
+  Variable Formula Calculus, with R pinning library and toolchain packages and α
+  pinning the toggle values — and AsgOf/AsgPkgs are the proven round-trip
+  between that assignment and the solver's view of it.
+
+  If you'd like, I can add a small executable demo to tests/: a repository
+  containing dafny@410/411/412 as packages, two libraries with measured support
+  formulae, and a unicode-char global variable — run through the §4.6 reduction
+  and the exhaustive resolver to show toolchain agreement, option solving, and a
+  deliberate option conflict surfacing as "no resolution."
+
+✻ Baked for 1m 22s

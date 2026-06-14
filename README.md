@@ -30,8 +30,12 @@ src/                    Definitions and executable functions/methods
   ConcurrentFeatures.dfy  §5.2  Concurrent Feature Package Calculus + composed reduction
   SatEncoding.dfy         App C SAT encoding of resolution
   Hardness.dfy            App B 3-SAT → resolution construction
+  Provenance.dfy          (beyond the paper) per-object change provenance and
+                          import-set compatibility windows; reduces to §3.2
 lemmas/                 Proofs of the paper's claims (all machine-checked)
 tests/                  Executable examples from the paper (`dafny test`)
+compat/                 Worked example: contract-derived version compatibility
+                        checking for Dafny libraries (see RELATED-WORK.md §2)
 ```
 
 All predicates in `src/` are compiled (non-ghost), so a candidate
@@ -63,6 +67,19 @@ NP-membership half of Theorem 3.1.4.
 | **Thm 5.2.2** | feature∘concurrent composition sound | **FALSE as stated** — see below and [FINDINGS.md](FINDINGS.md) |
 | Thm 5.2.2′ | … sound under feature coherence | `ConcFeatReductionSoundCoherent` (ConcurrentFeaturesLemmas); `CoherentWhenSingleFeature` discharges the hypothesis when no dependency requires two features |
 | Thm C.2/C.3 | SAT encoding sound & complete | `Encode{Sound,Complete}` (SatEncodingLemmas) |
+
+Beyond the paper — the import-set compatibility model (`Provenance.dfy` /
+`ProvenanceLemmas.dfy`), where a library is a single version timeline and a
+consumer's compatible range is derived from the objects it actually imports
+plus per-object breaking-change provenance:
+
+| Claim | Lemma (all verified) |
+|---|---|
+| the compatible window for an import set is the interval `[MinSupport, latest]` | `WindowIsInterval` |
+| the latest version is always import-compatible | `BaselineInWindow` |
+| a larger import set never widens the window (class-compatible ⇒ import-compatible) | `ImportMonotone` |
+| the coarse compatibility class is the window for the full object set; per-import windows refine it | `ClassRefinement` |
+| a window **is** the §3.2 formula `>= MinSupport && <= latest`, so windowed resolution is `ValidVfResolution` and reduces to the core via Thm 3.2.7 | `WindowAsFormula`, `WindowMatchesEval` |
 
 ## A finding: Theorem 5.2.2 fails as stated (and a verified repair)
 

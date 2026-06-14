@@ -1,4 +1,4 @@
-includes = ["src/*.dfy", "lemmas/*.dfy", "tests/*.dfy"]
+includes = ["src/*.dfy", "lemmas/*.dfy", "tests/*.dfy", "compat/*.dfy"]
 
 [options]
 verification-time-limit = 120
