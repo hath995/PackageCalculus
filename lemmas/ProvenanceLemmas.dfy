@@ -184,4 +184,204 @@ module ProvenanceLemmas {
       WindowIsInterval(h, s, w);
     }
   }
+
+  // ---- combining import sets across dependers: the join model -------------
+  //
+  //   JoinLeResolver                  — the join is the LEAST version that can
+  //                                     resolve the union: any resolver >= it.
+  //   CombinedSatisfiableIffResolves  — satisfiability IS "some version resolves
+  //                                     the whole union", and the witness is the
+  //                                     join. So cross-depender resolution is a
+  //                                     single-point check at the join.
+  //   LatestAnchoredSatisfiable       — a lone latest-anchored import set is
+  //                                     always satisfiable: the join model
+  //                                     strictly extends the window model and
+  //                                     only reports conflict across anchors.
+
+  // The join is the least version that can satisfy U: any resolver dominates it.
+  // The max-era object is in its era only at versions >= its era start, and a
+  // version's last_changed never exceeds the version itself.
+  lemma JoinLeResolver(h: History, U: set<EraReq>, v: Version)
+    requires WfHistory(h) && WfReq(h, U) && U != {}
+    requires ValidVersion(h, v) && ResolvesAt(h, U, v)
+    ensures Join(h, U) <= v
+  {
+    var m := Join(h, U);
+    assert m in ReqEras(U);
+    assert exists r :: r in U && r.1 == m;
+    var rstar :| rstar in U && rstar.1 == m;
+    assert LastBreak(h, rstar.0, v) == rstar.1;   // ResolvesAt at v
+    // LastBreak(h, rstar.0, v) <= v, and it equals m.
+  }
+
+  // Satisfiability of the requirement union is exactly "some released version
+  // resolves the whole union", with the join as witness. So combined resolution
+  // across dependers reduces to a single-point evaluation at the join: no search.
+  lemma CombinedSatisfiableIffResolves(h: History, U: set<EraReq>)
+    requires WfHistory(h) && WfReq(h, U)
+    ensures CombinedSatisfiable(h, U)
+        <==> (exists v :: ValidVersion(h, v) && ResolvesAt(h, U, v))
+  {
+    // (==>) the join (or, for the empty union, the latest version) resolves U.
+    if CombinedSatisfiable(h, U) {
+      if U == {} {
+        assert ValidVersion(h, Latest(h)) && ResolvesAt(h, U, Latest(h));
+      } else {
+        assert ValidVersion(h, Join(h, U)) && ResolvesAt(h, U, Join(h, U));
+      }
+    }
+    // (<==) any resolver v gives consistency (clause 1), and pulling each object
+    // back from v to the join keeps it in the same era (StableEra).
+    if exists v :: ValidVersion(h, v) && ResolvesAt(h, U, v) {
+      var v :| ValidVersion(h, v) && ResolvesAt(h, U, v);
+      forall a, b | a in U && b in U && a.0 == b.0
+        ensures a.1 == b.1
+      {
+        assert LastBreak(h, a.0, v) == a.1;
+        assert LastBreak(h, b.0, v) == b.1;
+      }
+      assert SingleTagged(U);
+      if U != {} {
+        var m := Join(h, U);
+        JoinLeResolver(h, U, v);
+        forall r | r in U
+          ensures Present(h, r.0, m) && LastBreak(h, r.0, m) == r.1
+        {
+          assert LastBreak(h, r.0, v) == r.1 <= m <= v;
+          StableEra(h, r.0, v, m);
+        }
+        assert ResolvesAt(h, U, m);
+      }
+      assert CombinedSatisfiable(h, U);
+    }
+  }
+
+  // The latest-anchored import set as a requirement union: import set s, each
+  // object pinned to the form it has at the latest version.
+  function LatestAnchored(h: History, s: set<Obj>): set<EraReq>
+    requires WfHistory(h) && ImportsPresentAtLatest(h, s)
+  {
+    set o | o in s :: (o, LastBreak(h, o, Latest(h)))
+  }
+
+  // Consistency with the window model: a single depender's latest-anchored
+  // imports are ALWAYS satisfiable, resolved by the latest version. So the join
+  // model strictly extends the window model — it never reports a conflict for a
+  // lone latest-anchored set, only when eras come from different anchors.
+  lemma LatestAnchoredSatisfiable(h: History, s: set<Obj>)
+    requires WfHistory(h) && ImportsPresentAtLatest(h, s)
+    ensures WfReq(h, LatestAnchored(h, s))
+    ensures CombinedSatisfiable(h, LatestAnchored(h, s))
+  {
+    var U := LatestAnchored(h, s);
+    forall r | r in U
+      ensures ValidVersion(h, r.1) && Present(h, r.0, r.1) && BrokeAt(h, r.0, r.1)
+    {
+      var o :| o in s && r == (o, LastBreak(h, o, Latest(h)));
+      // LastBreak ensures BrokeAt & ValidVersion; broke <= objs gives Present.
+      assert h.releases[r.1].broke <= h.releases[r.1].objs;
+    }
+    assert WfReq(h, U);
+    forall r | r in U
+      ensures Present(h, r.0, Latest(h)) && LastBreak(h, r.0, Latest(h)) == r.1
+    {
+      var o :| o in s && r == (o, LastBreak(h, o, Latest(h)));
+    }
+    assert ResolvesAt(h, U, Latest(h));
+    CombinedSatisfiableIffResolves(h, U);
+  }
+
+  // ---- deriving the requirement union from a dependency set ---------------
+  //
+  //   AnchoredImportWfReq / UnionReqWfReq  — anchored imports, and unions of
+  //                                          them, are well-formed requirement
+  //                                          sets: the join machinery applies.
+  //   SingleDependerSatisfiable            — one depender is always satisfiable
+  //                                          on its own (resolved at its anchor);
+  //                                          LatestAnchoredSatisfiable is the
+  //                                          anchor = latest special case.
+  //   GraphResolves                        — satisfiability of a whole dependency
+  //                                          set ⇔ some version resolves it.
+  //   DependerSatisfiedAtJoin              — at a resolving version, every
+  //                                          depender sees each import in the
+  //                                          same form it had at its anchor.
+
+  // An anchored import is a well-formed requirement set: each (o, last_changed)
+  // names an era at which o exists and broke.
+  lemma AnchoredImportWfReq(h: History, d: Depender)
+    requires WfHistory(h) && WfDepender(h, d)
+    ensures WfReq(h, AnchoredImport(h, d))
+  {
+    forall r | r in AnchoredImport(h, d)
+      ensures ValidVersion(h, r.1) && Present(h, r.0, r.1) && BrokeAt(h, r.0, r.1)
+    {
+      var o :| o in d.imports && r == (o, LastBreak(h, o, d.anchor));
+      assert h.releases[r.1].broke <= h.releases[r.1].objs;   // broke <= objs ⇒ Present
+    }
+  }
+
+  // A union of anchored imports is well-formed: WfReq is a per-element property,
+  // and every element comes from some depender's (well-formed) anchored import.
+  lemma UnionReqWfReq(h: History, ds: set<Depender>)
+    requires WfHistory(h) && WfDependers(h, ds)
+    ensures WfReq(h, UnionReq(h, ds))
+  {
+    forall r | r in UnionReq(h, ds)
+      ensures ValidVersion(h, r.1) && Present(h, r.0, r.1) && BrokeAt(h, r.0, r.1)
+    {
+      var d :| d in ds && r in AnchoredImport(h, d);
+      AnchoredImportWfReq(h, d);
+    }
+  }
+
+  // One depender on its own always resolves — at its own anchor, where each
+  // import is by construction in exactly its required era.
+  lemma SingleDependerSatisfiable(h: History, d: Depender)
+    requires WfHistory(h) && WfDepender(h, d)
+    ensures WfReq(h, AnchoredImport(h, d))
+    ensures CombinedSatisfiable(h, AnchoredImport(h, d))
+  {
+    AnchoredImportWfReq(h, d);
+    var U := AnchoredImport(h, d);
+    forall r | r in U
+      ensures Present(h, r.0, d.anchor) && LastBreak(h, r.0, d.anchor) == r.1
+    {
+      var o :| o in d.imports && r == (o, LastBreak(h, o, d.anchor));
+    }
+    assert ResolvesAt(h, U, d.anchor);
+    CombinedSatisfiableIffResolves(h, U);
+  }
+
+  // The dispatchable check over a dependency set: the union is well-formed, and
+  // it is satisfiable iff some library version resolves every depender at once —
+  // with the join as witness. This is the single per-library check the resolver
+  // runs over the whole graph.
+  lemma GraphResolves(h: History, ds: set<Depender>)
+    requires WfHistory(h) && WfDependers(h, ds)
+    ensures WfReq(h, UnionReq(h, ds))
+    ensures CombinedSatisfiable(h, UnionReq(h, ds))
+        <==> (exists v :: ValidVersion(h, v) && ResolvesAt(h, UnionReq(h, ds), v))
+  {
+    UnionReqWfReq(h, ds);
+    CombinedSatisfiableIffResolves(h, UnionReq(h, ds));
+  }
+
+  // At a version that resolves the whole set, each depender sees every one of
+  // its imports in the SAME form it had at that depender's anchor — closing the
+  // loop back to the per-object compatibility notion (SameForm) of the window
+  // model. So a graph resolution is a genuine simultaneous compatibility point.
+  lemma DependerSatisfiedAtJoin(h: History, ds: set<Depender>, d: Depender, v: Version)
+    requires WfHistory(h) && WfDependers(h, ds) && d in ds
+    requires ValidVersion(h, v) && ResolvesAt(h, UnionReq(h, ds), v)
+    ensures forall o | o in d.imports :: SameForm(h, o, d.anchor, v)
+  {
+    forall o | o in d.imports
+      ensures SameForm(h, o, d.anchor, v)
+    {
+      var r := (o, LastBreak(h, o, d.anchor));
+      assert r in AnchoredImport(h, d);
+      assert r in UnionReq(h, ds);              // d in ds
+      assert LastBreak(h, o, v) == r.1;         // ResolvesAt at v
+    }
+  }
 }

@@ -179,4 +179,139 @@ module Provenance {
   {
     VAnd(VCmp(Ge, MinSupport(h, s)), VCmp(Le, Latest(h)))
   }
+
+  // ---- combining import sets across dependers (the join model) ------------
+  //
+  // [NOT from the paper.] A single depender's imports give a window resolved
+  // against the latest version (above). Here SEVERAL dependers each depend on
+  // THIS library, and we ask when one version of it satisfies them all.
+  //
+  // Generalise an import beyond the latest-anchored window: a depender authored
+  // against some anchor version requires each imported object o in the *form*
+  // (breaking-free era) it had at that anchor — the era starting at
+  // LastBreak(o, anchor). Record that as an era requirement (o, e): "I need o
+  // with last_changed exactly e." Collect every depender's requirements into a
+  // union U.
+  //
+  // Two facts turn resolution into a single-point check rather than a search:
+  //   * Clause 1 (consistency). If one object is required in two distinct eras
+  //     (same o, different e), no version shows o in both — unsatisfiable.
+  //   * The JOIN. Otherwise let m be the maximum required era over U. Only a
+  //     version >= m can satisfy the highest requirement, and only a version
+  //     below each object's next break keeps every object in its required era;
+  //     the unique minimal candidate is m itself. So U is satisfiable iff
+  //     release m still shows every required object in its required era — and
+  //     then m IS the resolution (CombinedSatisfiableIffResolves and
+  //     JoinLeResolver in lemmas/ProvenanceLemmas.dfy).
+  //
+  // This is where genuine cross-depender conflict becomes visible. A lone
+  // latest-anchored window never excludes the head, so two windows over one
+  // library always overlap at the latest version (LatestAnchoredSatisfiable);
+  // the join model, by letting eras come from different anchors, can be
+  // unsatisfiable (see tests/ProvenanceTests.dfy).
+
+  // An era requirement: object o is needed with last_changed exactly e.
+  type EraReq = (Obj, Version)
+
+  // Clause 1: no object is required in two distinct eras.
+  predicate SingleTagged(U: set<EraReq>) {
+    forall a, b | a in U && b in U && a.0 == b.0 :: a.1 == b.1
+  }
+
+  // Each requirement names a real era: a version at which the object exists and
+  // broke (a breaking-free era starts at a break). LastBreak(o, anchor) for an
+  // object present at the anchor always yields such an era, so requirement sets
+  // derived from real imports are well-formed.
+  predicate WfReq(h: History, U: set<EraReq>)
+    requires WfHistory(h)
+  {
+    forall r | r in U ::
+      ValidVersion(h, r.1) && Present(h, r.0, r.1) && BrokeAt(h, r.0, r.1)
+  }
+
+  // Version v satisfies the whole union: every required object is present at v
+  // in exactly its required era.
+  predicate ResolvesAt(h: History, U: set<EraReq>, v: Version)
+    requires WfHistory(h) && ValidVersion(h, v)
+  {
+    forall r | r in U :: Present(h, r.0, v) && LastBreak(h, r.0, v) == r.1
+  }
+
+  // The required eras present in U.
+  function ReqEras(U: set<EraReq>): set<Version> {
+    set r | r in U :: r.1
+  }
+
+  // The join: the maximum required era — the unique minimal version that can
+  // satisfy U (minimality proved in ProvenanceLemmas.JoinLeResolver). A released
+  // version whenever U is a non-empty well-formed requirement set.
+  function Join(h: History, U: set<EraReq>): Version
+    requires WfHistory(h) && WfReq(h, U) && U != {}
+    ensures Join(h, U) in ReqEras(U)
+    ensures ValidVersion(h, Join(h, U))
+    ensures forall r | r in U :: r.1 <= Join(h, U)
+  {
+    assert ReqEras(U) != {} by { var r :| r in U; assert r.1 in ReqEras(U); }
+    var m := SetMax(ReqEras(U));
+    assert ValidVersion(h, m) by { assert m in ReqEras(U); var r :| r in U && r.1 == m; }
+    assert forall r | r in U :: r.1 <= m by {
+      forall r | r in U ensures r.1 <= m { assert r.1 in ReqEras(U); }
+    }
+    m
+  }
+
+  // U is satisfiable iff it is consistent (clause 1) and the join still shows
+  // every required object in its required era. The empty union is trivially
+  // satisfiable. Equivalent to "some version resolves U", with the join as the
+  // witness — ProvenanceLemmas.CombinedSatisfiableIffResolves.
+  predicate CombinedSatisfiable(h: History, U: set<EraReq>)
+    requires WfHistory(h) && WfReq(h, U)
+  {
+    SingleTagged(U) && (U == {} || ResolvesAt(h, U, Join(h, U)))
+  }
+
+  // ---- deriving the requirement union from a dependency set ---------------
+  //
+  // A depender on THIS library is an anchor version together with the objects
+  // it imports (present at that anchor). Its contribution to the requirement
+  // union is each imported object pinned to the era it had at the anchor —
+  // AnchoredImport. The union over all dependers is UnionReq, and resolving the
+  // library against the whole set is CombinedSatisfiable(h, UnionReq(h, ds)).
+  //
+  // The lemmas live in ProvenanceLemmas.dfy:
+  //   AnchoredImportWfReq / UnionReqWfReq  — these sets are well-formed, so the
+  //                                          join machinery applies;
+  //   GraphResolves                        — satisfiability of the set ⇔ some
+  //                                          version resolves it (join witness);
+  //   DependerSatisfiedAtJoin              — at a resolving version every
+  //                                          depender sees each import in the
+  //                                          SAME form it had at its anchor.
+
+  datatype Depender = Depender(anchor: Version, imports: set<Obj>)
+
+  predicate WfDepender(h: History, d: Depender)
+    requires WfHistory(h)
+  {
+    ValidVersion(h, d.anchor) && forall o | o in d.imports :: Present(h, o, d.anchor)
+  }
+
+  predicate WfDependers(h: History, ds: set<Depender>)
+    requires WfHistory(h)
+  {
+    forall d | d in ds :: WfDepender(h, d)
+  }
+
+  // One depender's requirements: each import in the era it had at the anchor.
+  function AnchoredImport(h: History, d: Depender): set<EraReq>
+    requires WfHistory(h) && WfDepender(h, d)
+  {
+    set o | o in d.imports :: (o, LastBreak(h, o, d.anchor))
+  }
+
+  // The requirement union induced by a whole set of dependers on this library.
+  function UnionReq(h: History, ds: set<Depender>): set<EraReq>
+    requires WfHistory(h) && WfDependers(h, ds)
+  {
+    set d, r | d in ds && r in AnchoredImport(h, d) :: r
+  }
 }
